@@ -7,9 +7,11 @@
  *******************************************************************************/
 package org.eclipse.rdf4j.examples.function;
 
+import static org.eclipse.rdf4j.model.util.Values.literal;
+
 import org.eclipse.rdf4j.model.Literal;
 import org.eclipse.rdf4j.model.Value;
-import org.eclipse.rdf4j.model.ValueFactory;
+import org.eclipse.rdf4j.query.algebra.evaluation.TripleSource;
 import org.eclipse.rdf4j.query.algebra.evaluation.ValueExprEvaluationException;
 import org.eclipse.rdf4j.query.algebra.evaluation.function.Function;
 
@@ -39,7 +41,7 @@ public class PalindromeFunction implements Function {
 	 *                                      literal.
 	 */
 	@Override
-	public Value evaluate(ValueFactory valueFactory, Value... args)
+	public Value evaluate(TripleSource tripleSource, Value... args)
 			throws ValueExprEvaluationException {
 		// our palindrome function expects only a single argument, so throw an error
 		// if there's more than one
@@ -67,6 +69,6 @@ public class PalindromeFunction implements Function {
 
 		// a function is always expected to return a Value object, so we
 		// return our boolean result as a Literal
-		return valueFactory.createLiteral(palindrome);
+		return literal(palindrome);
 	}
 }
