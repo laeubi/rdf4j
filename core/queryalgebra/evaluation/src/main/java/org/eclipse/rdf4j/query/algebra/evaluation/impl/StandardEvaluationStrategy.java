@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2015 Eclipse RDF4J contributors, Aduna, and others.
+ * Copyright (c) 2022 Eclipse RDF4J contributors.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Eclipse Distribution License v1.0
  * which accompanies this distribution, and is available at
@@ -18,6 +18,7 @@ import org.eclipse.rdf4j.common.iteration.CloseableIteration;
 import org.eclipse.rdf4j.common.iteration.DistinctIteration;
 import org.eclipse.rdf4j.common.iteration.EmptyIteration;
 import org.eclipse.rdf4j.common.iteration.IterationWrapper;
+import org.eclipse.rdf4j.common.iteration.LookAheadIteration;
 import org.eclipse.rdf4j.common.iteration.ReducedIteration;
 import org.eclipse.rdf4j.common.iteration.SingletonIteration;
 import org.eclipse.rdf4j.common.net.ParsedIRI;
@@ -27,6 +28,7 @@ import org.eclipse.rdf4j.model.Literal;
 import org.eclipse.rdf4j.model.Resource;
 import org.eclipse.rdf4j.model.Triple;
 import org.eclipse.rdf4j.model.Value;
+import org.eclipse.rdf4j.model.ValueFactory;
 import org.eclipse.rdf4j.model.base.CoreDatatype;
 import org.eclipse.rdf4j.model.datatypes.XMLDatatypeUtil;
 import org.eclipse.rdf4j.model.impl.BooleanLiteral;
@@ -94,6 +96,7 @@ import org.eclipse.rdf4j.query.algebra.StatementPattern.Scope;
 import org.eclipse.rdf4j.query.algebra.Str;
 import org.eclipse.rdf4j.query.algebra.TripleRef;
 import org.eclipse.rdf4j.query.algebra.TupleExpr;
+import org.eclipse.rdf4j.query.algebra.TupleFunctionCall;
 import org.eclipse.rdf4j.query.algebra.UnaryTupleOperator;
 import org.eclipse.rdf4j.query.algebra.UnaryValueOperator;
 import org.eclipse.rdf4j.query.algebra.Union;
@@ -103,6 +106,7 @@ import org.eclipse.rdf4j.query.algebra.ValueExprTripleRef;
 import org.eclipse.rdf4j.query.algebra.Var;
 import org.eclipse.rdf4j.query.algebra.ZeroLengthPath;
 import org.eclipse.rdf4j.query.algebra.evaluation.EvaluationStrategy;
+import org.eclipse.rdf4j.query.algebra.evaluation.QueryBindingSet;
 import org.eclipse.rdf4j.query.algebra.evaluation.QueryEvaluationStep;
 import org.eclipse.rdf4j.query.algebra.evaluation.QueryOptimizer;
 import org.eclipse.rdf4j.query.algebra.evaluation.QueryOptimizerPipeline;
@@ -116,6 +120,8 @@ import org.eclipse.rdf4j.query.algebra.evaluation.federation.FederatedServiceRes
 import org.eclipse.rdf4j.query.algebra.evaluation.federation.FederatedServiceResolverClient;
 import org.eclipse.rdf4j.query.algebra.evaluation.function.Function;
 import org.eclipse.rdf4j.query.algebra.evaluation.function.FunctionRegistry;
+import org.eclipse.rdf4j.query.algebra.evaluation.function.TupleFunction;
+import org.eclipse.rdf4j.query.algebra.evaluation.function.TupleFunctionRegistry;
 import org.eclipse.rdf4j.query.algebra.evaluation.function.datetime.Now;
 import org.eclipse.rdf4j.query.algebra.evaluation.impl.evaluationsteps.BindingSetAssignmentQueryEvaluationStep;
 import org.eclipse.rdf4j.query.algebra.evaluation.impl.evaluationsteps.IntersectionQueryEvaluationStep;
@@ -143,30 +149,23 @@ import org.eclipse.rdf4j.query.algebra.evaluation.util.OrderComparator;
 import org.eclipse.rdf4j.query.algebra.evaluation.util.QueryEvaluationUtil;
 import org.eclipse.rdf4j.query.algebra.evaluation.util.QueryEvaluationUtility;
 import org.eclipse.rdf4j.query.algebra.evaluation.util.ValueComparator;
+import org.eclipse.rdf4j.query.algebra.evaluation.util.XMLDatatypeMathUtil;
 import org.eclipse.rdf4j.query.impl.EmptyBindingSet;
 import org.eclipse.rdf4j.util.UUIDable;
 
 import com.google.common.base.Stopwatch;
 
 /**
- * Minimally-conforming SPARQL 1.1 Query Evaluation strategy, to evaluate one {@link TupleExpr} on the given
- * {@link TripleSource}, optionally using the given {@link Dataset}.
+ * Standard SPARQL 1.1 Query Evaluation strategy, to evaluate one {@link TupleExpr} on the given {@link TripleSource},
+ * optionally using the given {@link Dataset}.
  *
  * @author Jeen Broekstra
  * @author James Leigh
  * @author Arjohn Kampman
  * @author David Huynh
  * @author Andreas Schwarte
- * @see ExtendedEvaluationStrategy
- * 
- * @deprecated since 4.1.0. Use {@link StandardEvaluationStrategy} instead.
  */
-@Deprecated(since = "4.1.0", forRemoval = true)
-public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedServiceResolverClient, UUIDable {
-
-	/*-----------*
-	 * Constants *
-	 *-----------*/
+public class StandardEvaluationStrategy implements EvaluationStrategy, FederatedServiceResolverClient, UUIDable {
 
 	protected final TripleSource tripleSource;
 
@@ -191,40 +190,89 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 
 	private QueryOptimizerPipeline pipeline;
 
-	/*--------------*
-	 * Constructors *
-	 *--------------*/
+	private final TupleFunctionRegistry tupleFuncRegistry;
 
-	public StrictEvaluationStrategy(TripleSource tripleSource, FederatedServiceResolver serviceResolver) {
+	static CloseableIteration<BindingSet, QueryEvaluationException> evaluate(TupleFunction func,
+			final List<Var> resultVars, final BindingSet bindings, ValueFactory valueFactory, Value... argValues)
+			throws QueryEvaluationException {
+		final CloseableIteration<? extends List<? extends Value>, QueryEvaluationException> iter = func
+				.evaluate(valueFactory, argValues);
+		return new LookAheadIteration<BindingSet, QueryEvaluationException>() {
+
+			@Override
+			public BindingSet getNextElement() throws QueryEvaluationException {
+				QueryBindingSet resultBindings = null;
+				while (resultBindings == null && iter.hasNext()) {
+					resultBindings = new QueryBindingSet(bindings);
+					List<? extends Value> values = iter.next();
+					if (resultVars.size() != values.size()) {
+						throw new QueryEvaluationException("Incorrect number of result vars: require " + values.size());
+					}
+					for (int i = 0; i < values.size(); i++) {
+						Value result = values.get(i);
+						Var resultVar = resultVars.get(i);
+						Value varValue = resultVar.getValue();
+						String varName = resultVar.getName();
+						Value boundValue = bindings.getValue(varName);
+						if ((varValue == null || result.equals(varValue))
+								&& (boundValue == null || result.equals(boundValue))) {
+							if (boundValue == null) { // if not already present
+								resultBindings.addBinding(varName, result);
+							}
+						} else {
+							resultBindings = null;
+							break;
+						}
+					}
+				}
+				return resultBindings;
+			}
+
+			@Override
+			protected void handleClose() throws QueryEvaluationException {
+				try {
+					super.handleClose();
+				} finally {
+					iter.close();
+				}
+			}
+		};
+	}
+
+	public StandardEvaluationStrategy(TripleSource tripleSource, FederatedServiceResolver serviceResolver) {
 		this(tripleSource, null, serviceResolver);
 	}
 
-	public StrictEvaluationStrategy(TripleSource tripleSource, Dataset dataset,
+	public StandardEvaluationStrategy(TripleSource tripleSource, Dataset dataset,
 			FederatedServiceResolver serviceResolver) {
 		this(tripleSource, dataset, serviceResolver, 0, new EvaluationStatistics());
 	}
 
-	public StrictEvaluationStrategy(TripleSource tripleSource, Dataset dataset,
+	public StandardEvaluationStrategy(TripleSource tripleSource, Dataset dataset,
 			FederatedServiceResolver serviceResolver, long iterationCacheSyncTreshold,
 			EvaluationStatistics evaluationStatistics) {
 		this(tripleSource, dataset, serviceResolver, iterationCacheSyncTreshold, evaluationStatistics, false);
-
 	}
 
-	public StrictEvaluationStrategy(TripleSource tripleSource, Dataset dataset,
+	public StandardEvaluationStrategy(TripleSource tripleSource, Dataset dataset,
 			FederatedServiceResolver serviceResolver, long iterationCacheSyncTreshold,
 			EvaluationStatistics evaluationStatistics, boolean trackResultSize) {
+		this(tripleSource, dataset, serviceResolver, iterationCacheSyncTreshold, evaluationStatistics, trackResultSize,
+				TupleFunctionRegistry.getInstance());
+	}
+
+	public StandardEvaluationStrategy(TripleSource tripleSource, Dataset dataset,
+			FederatedServiceResolver serviceResolver, long iterationCacheSyncTreshold,
+			EvaluationStatistics evaluationStatistics, boolean trackResultSize,
+			TupleFunctionRegistry tupleFunctionRegistry) {
 		this.tripleSource = tripleSource;
 		this.dataset = dataset;
 		this.serviceResolver = serviceResolver;
 		this.iterationCacheSyncThreshold = iterationCacheSyncTreshold;
 		this.pipeline = new StandardQueryOptimizerPipeline(this, tripleSource, evaluationStatistics);
 		this.trackResultSize = trackResultSize;
+		this.tupleFuncRegistry = tupleFunctionRegistry;
 	}
-
-	/*---------*
-	 * Methods *
-	 *---------*/
 
 	@Deprecated(forRemoval = true, since = "4.0.0")
 	@Override
@@ -295,6 +343,8 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 			ret = evaluate((BindingSetAssignment) expr, bindings);
 		} else if (expr instanceof TripleRef) {
 			ret = evaluate((TripleRef) expr, bindings);
+		} else if (expr instanceof TupleFunctionCall) {
+			return evaluate((TupleFunctionCall) expr, bindings);
 		} else if (expr == null) {
 			throw new IllegalArgumentException("expr must not be null");
 		} else {
@@ -348,6 +398,8 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 			ret = prepare((BindingSetAssignment) expr, context);
 		} else if (expr instanceof TripleRef) {
 			ret = prepare((TripleRef) expr, context);
+		} else if (expr instanceof TupleFunctionCall) {
+			ret = prepare((TupleFunctionCall) expr, context);
 		} else if (expr == null) {
 			throw new IllegalArgumentException("expr must not be null");
 		} else {
@@ -399,7 +451,7 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 
 			@Override
 			public CloseableIteration<BindingSet, QueryEvaluationException> evaluate(BindingSet bindings) {
-				return new PathIteration(StrictEvaluationStrategy.this, scope, subjectVar, pathExpression, objVar,
+				return new PathIteration(StandardEvaluationStrategy.this, scope, subjectVar, pathExpression, objVar,
 						contextVar, minLength, bindings);
 			}
 		};
@@ -456,7 +508,7 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 		return new QueryEvaluationStep() {
 			@Override
 			public CloseableIteration<BindingSet, QueryEvaluationException> evaluate(BindingSet bindings) {
-				return new GroupIterator(StrictEvaluationStrategy.this, node, bindings, iterationCacheSyncThreshold,
+				return new GroupIterator(StandardEvaluationStrategy.this, node, bindings, iterationCacheSyncThreshold,
 						context);
 			}
 		};
@@ -536,9 +588,6 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 
 	protected QueryEvaluationStep prepare(Filter node, QueryEvaluationContext context) throws QueryEvaluationException {
 
-		if (FilterIterator.isPartOfSubQuery(node)) {
-			context = new FilterIterator.RetainedVariableFilteredQueryEvaluationContext(node, context);
-		}
 		QueryEvaluationStep arg = precompile(node.getArg(), context);
 		QueryValueEvaluationStep ves;
 		try {
@@ -547,23 +596,18 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 			// If we have a failed compilation we always return false.
 			// Which means empty. so let's short circuit that.
 //			ves = new QueryValueEvaluationStep.ConstantQueryValueEvaluationStep(BooleanLiteral.FALSE);
-			return QueryEvaluationStep.empty();
-		}
-		// if the query evaluation is constant it is either FILTER(true) or FILTER(false)
-		// in one case we can remove this step from the evaluated plan
-		// in the other case nothing can pass the filter so we can return the empty set.
-		if (ves.isConstant()) {
-			if (StrictEvaluationStrategy.this.isTrue(ves, EmptyBindingSet.getInstance())) {
-				return arg;
-			} else {
-				return QueryEvaluationStep.empty();
-			}
+			return new QueryEvaluationStep() {
+				@Override
+				public CloseableIteration<BindingSet, QueryEvaluationException> evaluate(BindingSet bs) {
+					return new EmptyIteration<>();
+				}
+			};
 		}
 		return new QueryEvaluationStep() {
 
 			@Override
 			public CloseableIteration<BindingSet, QueryEvaluationException> evaluate(BindingSet bs) {
-				return new FilterIterator(node, arg.evaluate(bs), ves, StrictEvaluationStrategy.this);
+				return new FilterIterator(node, arg.evaluate(bs), ves, StandardEvaluationStrategy.this);
 			}
 		};
 	}
@@ -593,7 +637,7 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 		@Override
 		public CloseableIteration<BindingSet, QueryEvaluationException> evaluate(BindingSet bs) {
 			// TODO fix the sharing of the now element to be safe
-			StrictEvaluationStrategy.this.sharedValueOfNow = null;
+			StandardEvaluationStrategy.this.sharedValueOfNow = null;
 			return arg.evaluate(bs);
 		}
 	}
@@ -605,7 +649,8 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 
 			@Override
 			public CloseableIteration<BindingSet, QueryEvaluationException> evaluate(BindingSet bs) {
-				return new DescribeIteration(child.evaluate(bs), StrictEvaluationStrategy.this, node.getBindingNames(),
+				return new DescribeIteration(child.evaluate(bs), StandardEvaluationStrategy.this,
+						node.getBindingNames(),
 						bs);
 			}
 		};
@@ -620,7 +665,7 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 			public CloseableIteration<BindingSet, QueryEvaluationException> evaluate(BindingSet bindings) {
 				final CloseableIteration<BindingSet, QueryEvaluationException> evaluate = child.evaluate(bindings);
 				return new DistinctIteration<BindingSet, QueryEvaluationException>(evaluate,
-						StrictEvaluationStrategy.this::makeSet);
+						StandardEvaluationStrategy.this::makeSet);
 			}
 		};
 
@@ -634,6 +679,32 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 			@Override
 			public CloseableIteration<BindingSet, QueryEvaluationException> evaluate(BindingSet bindings) {
 				return new ReducedIteration<>(arg.evaluate(bindings));
+			}
+		};
+	}
+
+	protected QueryEvaluationStep prepare(TupleFunctionCall expr, QueryEvaluationContext context)
+			throws QueryEvaluationException {
+		TupleFunction func = tupleFuncRegistry.get(expr.getURI())
+				.orElseThrow(() -> new QueryEvaluationException("Unknown tuple function '" + expr.getURI() + "'"));
+
+		List<ValueExpr> args = expr.getArgs();
+		QueryValueEvaluationStep[] argEpresions = new QueryValueEvaluationStep[args.size()];
+		for (int i = 0; i < args.size(); i++) {
+			argEpresions[i] = precompile(args.get(i), context);
+		}
+
+		return new QueryEvaluationStep() {
+
+			@Override
+			public CloseableIteration<BindingSet, QueryEvaluationException> evaluate(BindingSet bindings) {
+				Value[] argValues = new Value[args.size()];
+				for (int i = 0; i < args.size(); i++) {
+					argValues[i] = argEpresions[i].evaluate(bindings);
+				}
+
+				return StandardEvaluationStrategy.evaluate(func, expr.getResultVars(), bindings,
+						tripleSource.getValueFactory(), argValues);
 			}
 		};
 	}
@@ -885,7 +956,13 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 
 	protected QueryEvaluationStep prepare(EmptySet emptySet, QueryEvaluationContext context)
 			throws QueryEvaluationException {
-		return QueryEvaluationStep.empty();
+		return new QueryEvaluationStep() {
+
+			@Override
+			public CloseableIteration<BindingSet, QueryEvaluationException> evaluate(BindingSet bindings) {
+				return new EmptyIteration<>();
+			}
+		};
 	}
 
 	@Override
@@ -954,7 +1031,7 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 		} else if (expr instanceof CompareAll) {
 			return new QueryValueEvaluationStep.Minimal(this, expr);
 		} else if (expr instanceof Exists) {
-			return prepare((Exists) expr, context);
+			return new QueryValueEvaluationStep.Minimal(this, expr);
 		} else if (expr instanceof If) {
 			return new QueryValueEvaluationStep.Minimal(this, expr);
 		} else if (expr instanceof ListMemberOperator) {
@@ -1739,12 +1816,14 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 		Value leftVal = evaluate(node.getLeftArg(), bindings);
 		Value rightVal = evaluate(node.getRightArg(), bindings);
 
-		return BooleanLiteral.valueOf(QueryEvaluationUtil.compare(leftVal, rightVal, node.getOperator()));
+		boolean strict = true; // FIXME set to use new enum;
+		return BooleanLiteral.valueOf(QueryEvaluationUtil.compare(leftVal, rightVal, node.getOperator(), strict));
 	}
 
 	protected QueryValueEvaluationStep prepare(Compare node, QueryEvaluationContext context) {
+		boolean strict = true; // FIXME set to use new enum
 		return supplyBinaryValueEvaluation(node, (leftVal, rightVal) -> BooleanLiteral
-				.valueOf(QueryEvaluationUtil.compare(leftVal, rightVal, node.getOperator())), context);
+				.valueOf(QueryEvaluationUtil.compare(leftVal, rightVal, node.getOperator(), strict)), context);
 	}
 
 	@Deprecated(forRemoval = true)
@@ -1761,16 +1840,22 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 		throw new ValueExprEvaluationException("Both arguments must be numeric literals");
 	}
 
-	private Value mathOperationApplier(MathExpr node, Value leftVal, Value rightVal) {
+	private Value mathOperationApplier(MathExpr node, Value leftVal, Value rightVal, boolean strict) {
 		if (leftVal instanceof Literal && rightVal instanceof Literal) {
-			return MathUtil.compute((Literal) leftVal, (Literal) rightVal, node.getOperator());
+			if (strict) {
+				return MathUtil.compute((Literal) leftVal, (Literal) rightVal, node.getOperator());
+			} else {
+				return XMLDatatypeMathUtil.compute((Literal) leftVal, (Literal) rightVal, node.getOperator());
+			}
 		}
 
 		throw new ValueExprEvaluationException("Both arguments must be literals");
 	}
 
 	protected QueryValueEvaluationStep prepare(MathExpr node, QueryEvaluationContext context) {
-		return supplyBinaryValueEvaluation(node, (leftVal, rightVal) -> mathOperationApplier(node, leftVal, rightVal),
+		boolean strict = true; // FIXME use new enum
+		return supplyBinaryValueEvaluation(node,
+				(leftVal, rightVal) -> mathOperationApplier(node, leftVal, rightVal, strict),
 				context);
 	}
 
@@ -1917,20 +2002,6 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 		try (CloseableIteration<BindingSet, QueryEvaluationException> iter = evaluate(node.getSubQuery(), bindings)) {
 			return BooleanLiteral.valueOf(iter.hasNext());
 		}
-	}
-
-	private QueryValueEvaluationStep prepare(Exists node, QueryEvaluationContext context)
-			throws QueryEvaluationException {
-		QueryEvaluationStep subQuery = precompile(node.getSubQuery(), context);
-		return new QueryValueEvaluationStep() {
-
-			@Override
-			public Value evaluate(BindingSet bindings) throws ValueExprEvaluationException, QueryEvaluationException {
-				try (CloseableIteration<BindingSet, QueryEvaluationException> iter = subQuery.evaluate(bindings)) {
-					return BooleanLiteral.valueOf(iter.hasNext());
-				}
-			}
-		};
 	}
 
 	@Override
@@ -2192,10 +2263,5 @@ public class StrictEvaluationStrategy implements EvaluationStrategy, FederatedSe
 				}
 			};
 		}
-	}
-
-	@Override
-	public boolean isTrackResultSize() {
-		return trackResultSize;
 	}
 }
