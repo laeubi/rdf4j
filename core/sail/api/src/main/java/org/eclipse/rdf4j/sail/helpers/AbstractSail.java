@@ -14,10 +14,12 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import org.eclipse.rdf4j.common.transaction.IsolationLevel;
 import org.eclipse.rdf4j.common.transaction.IsolationLevels;
+import org.eclipse.rdf4j.common.transaction.QueryEvaluationMode;
 import org.eclipse.rdf4j.sail.Sail;
 import org.eclipse.rdf4j.sail.SailConnection;
 import org.eclipse.rdf4j.sail.SailException;
@@ -34,10 +36,6 @@ import org.slf4j.LoggerFactory;
  */
 public abstract class AbstractSail implements Sail {
 
-	/*-----------*
-	 * Constants *
-	 *-----------*/
-
 	/**
 	 * Default connection timeout on shutdown: 20,000 milliseconds.
 	 */
@@ -47,6 +45,11 @@ public abstract class AbstractSail implements Sail {
 	 * default transaction isolation level, set to {@link IsolationLevels#READ_COMMITTED }.
 	 */
 	private IsolationLevel defaultIsolationLevel = IsolationLevels.READ_COMMITTED;
+
+	/**
+	 * default SPARQL query evaluation mode, set to {@link QueryEvaluationMode#STANDARD}
+	 */
+	private QueryEvaluationMode defaultQueryEvaluationMode = QueryEvaluationMode.STANDARD;
 
 	/**
 	 * list of supported isolation levels. By default set to include {@link IsolationLevels#READ_UNCOMMITTED} and
@@ -75,10 +78,6 @@ public abstract class AbstractSail implements Sail {
 			return false;
 		}
 	}
-
-	/*-----------*
-	 * Variables *
-	 *-----------*/
 
 	private static final Logger logger = LoggerFactory.getLogger(AbstractSail.class);
 
@@ -127,10 +126,6 @@ public abstract class AbstractSail implements Sail {
 		this.addSupportedIsolationLevel(IsolationLevels.READ_UNCOMMITTED);
 		this.addSupportedIsolationLevel(IsolationLevels.SERIALIZABLE);
 	}
-
-	/*---------*
-	 * Methods *
-	 *---------*/
 
 	/**
 	 * Set connection timeout on shutdown (in ms).
@@ -406,5 +401,19 @@ public abstract class AbstractSail implements Sail {
 	 */
 	public void setTrackResultSize(boolean trackResultSize) {
 		this.trackResultSize = trackResultSize;
+	}
+
+	/**
+	 * @return the defaultQueryEvaluationMode
+	 */
+	public QueryEvaluationMode getDefaultQueryEvaluationMode() {
+		return defaultQueryEvaluationMode;
+	}
+
+	/**
+	 * @param defaultQueryEvaluationMode the defaultQueryEvaluationMode to set
+	 */
+	public void setDefaultQueryEvaluationMode(QueryEvaluationMode defaultQueryEvaluationMode) {
+		this.defaultQueryEvaluationMode = Objects.requireNonNull(defaultQueryEvaluationMode);
 	}
 }
