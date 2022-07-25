@@ -75,7 +75,7 @@ public class MediumConcurrencyTest extends SPARQLBaseTest {
 			});
 			Assertions.assertEquals("OK", message);
 		} catch (Throwable t) {
-			futures.stream().forEach(future -> future.cancel(true));
+			futures.forEach(future -> future.cancel(true));
 			throw t;
 		}
 
@@ -118,31 +118,4 @@ public class MediumConcurrencyTest extends SPARQLBaseTest {
 		});
 	}
 
-	/**
-	 * Execute a testcase, both queryFile and expectedResultFile must be files
-	 *
-	 * @param queryFile
-	 * @param expectedResultFile
-	 * @param checkOrder
-	 * @throws Exception
-	 */
-	protected void executeReadPartial(String queryFile)
-			throws Exception {
-
-		String queryString = readQueryString(queryFile);
-
-		Query query = queryManager().prepareQuery(queryString);
-
-		if (query instanceof TupleQuery) {
-			try (RepositoryConnection conn = fedxRule.getRepository().getConnection()) {
-				try (TupleQueryResult queryResult = ((TupleQuery) query).evaluate()) {
-					// explicitly consume only 1 binding set before closing
-					queryResult.next();
-				}
-			}
-
-		} else {
-			throw new IllegalStateException();
-		}
-	}
 }
